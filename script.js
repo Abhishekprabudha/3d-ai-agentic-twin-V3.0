@@ -1,7 +1,9 @@
 /* =========================================================================
-   Agentic Twin — Disrupt → Correct → Normal (Click-Driven v4.1)
-   This build is identical to v4 (chat panel + mute + chat commands),
-   EXCEPT: all auto-centering is disabled and initial padding is symmetric.
+   Agentic Twin — Disrupt → Correct → Normal + Hub Addition (v5)
+   - Left chat panel + narration (mute supported)
+   - New "Hub Addition" mode: compares Nagpur hub vs P2P baseline
+   - Computes & narrates: Movements, Truck-km, Mean/p90 OD ETA, Utilization
+   - No auto-centering; camera behavior unchanged from your v4.1
    ======================================================================= */
 
 /* -------------------- tiny debug pill -------------------- */
@@ -20,7 +22,10 @@ window.addEventListener("error",(e)=>debug(`Error: ${e.message||e}`));
 const STYLE_URL="style.json";
 const MAP_INIT={center:[78.9629,21.5937],zoom:5.5,minZoom:3,maxZoom:12};
 const WAREHOUSE_ICON_SRC="warehouse_iso.png";
-const AUTO_FIT = false;   // ← keep OFF: no auto-centering on actions
+const AUTO_FIT=false; // keep OFF
+const HUB_ID="H_NAG";
+const DEFAULT_CAPACITY_UNITS=10;
+const DEFAULT_SPEED_KMPH=55;
 
 /* -------------------- anchors -------------------- */
 const CITY={
@@ -28,7 +33,7 @@ const CITY={
   WH2:{name:"WH2 — Mumbai",    lat:19.0760, lon:72.8777},
   WH3:{name:"WH3 — Bangalore", lat:12.9716, lon:77.5946},
   WH4:{name:"WH4 — Hyderabad", lat:17.3850, lon:78.4867},
-  WH5:{name:"WH5 — Kolkata",   lat:22.5726, lon:88.3639},
+  WH5:{name:"WH5 — Kolkata",   lat:22.5726, lon:88.3639}
 };
 
 /* -------------------- route polylines (lat,lon) -------------------- */
@@ -42,15 +47,22 @@ const RP={
   "WH4-WH5":[[17.3850,78.4867],[18.0,82.0],[19.2,84.8],[21.0,86.0],[22.5726,88.3639]],
   "WH5-WH1":[[22.5726,88.3639],[23.6,86.1],[24.3,83.0],[25.4,81.8],[26.45,80.35],[27.1767,78.0081],[28.6139,77.2090]],
   "WH5-WH2":[[22.5726,88.3639],[23.5,86.0],[22.5,84.0],[21.5,81.5],[21.1,79.0],[20.3,76.5],[19.3,74.5],[19.0760,72.8777]],
-  "WH5-WH3":[[22.5726,88.3639],[21.15,85.8],[19.5,85.8],[17.9,82.7],[16.5,80.3],[13.3409,77.1010],[12.9716,77.5946]],
+  "WH5-WH3":[[22.5726,88.3639],[21.15,85.8],[19.5,85.8],[17.9,82.7],[16.5,80.3],[13.3409,77.1010],[12.9716,77.5946]]
 };
+/* Hub spokes (Nagpur 21.1458, 79.0882) */
+RP["WH1-H_NAG"]=[[28.6139,77.2090],[26.5,78.2],[24.7,79.0],[22.8,79.2],[21.1458,79.0882]];
+RP["WH2-H_NAG"]=[[19.0760,72.8777],[19.6,74.8],[20.2,76.9],[20.7,78.4],[21.1458,79.0882]];
+RP["WH3-H_NAG"]=[[12.9716,77.5946],[14.6,78.6],[16.8,79.3],[19.0,79.4],[21.1458,79.0882]];
+RP["WH4-H_NAG"]=[[17.3850,78.4867],[18.6,78.9],[19.8,79.2],[20.6,79.2],[21.1458,79.0882]];
+RP["WH5-H_NAG"]=[[22.5726,88.3639],[21.7,86.4],[21.2,83.8],[21.2,81.5],[21.1458,79.0882]];
+
 const keyFor=(a,b)=>`${a}-${b}`;
 const toLonLat=ll=>ll.map(p=>[p[1],p[0]]);
 function getRoadLatLon(a,b){
   const k1=keyFor(a,b), k2=keyFor(b,a);
   if(RP[k1]) return RP[k1];
   if(RP[k2]) return [...RP[k2]].reverse();
-  return [[CITY[a].lat,CITY[a].lon],[CITY[b].lat,CITY[b].lon]];
+  return [[CITY[a]?.lat??21.1458,CITY[a]?.lon??79.0882],[CITY[b]?.lat??21.1458,CITY[b]?.lon??79.0882]];
 }
 function expandIDsToLatLon(ids){
   const out=[];
@@ -62,106 +74,43 @@ function expandIDsToLatLon(ids){
   return out;
 }
 function networkGeoJSON(){
-  return {type:"FeatureCollection",features:Object.keys(RP).map(k=>({
+  const keys=Object.keys(RP);
+  return {type:"FeatureCollection",features:keys.map(k=>({
     type:"Feature",properties:{id:k},geometry:{type:"LineString",coordinates:toLonLat(RP[k])}
   }))};
 }
 
-/* -------------------- scenario storage -------------------- */
-let SCN_BEFORE=null, SCN_AFTER=null;
+/* -------------------- scenarios -------------------- */
+let SCN_BEFORE=null, SCN_AFTER=null, SCN_HUB=null;
 
 /* -------------------- default scenario (fallback) -------------------- */
 const DEFAULT_BEFORE={
   warehouses:Object.keys(CITY).map(id=>({id,location:CITY[id].name.split("—")[1].trim(),inventory:500})),
   trucks:[
-    {id:"T1", origin:"WH1", destination:"WH2", status:"On-Time", delay_hours:0},
-    {id:"T2", origin:"WH2", destination:"WH3", status:"On-Time", delay_hours:0},
-    {id:"T3", origin:"WH3", destination:"WH1", status:"On-Time", delay_hours:0},
-  ]
+    {id:"T1", origin:"WH1", destination:"WH2", status:"On-Time", delay_hours:0, units:3, speed_kmph:55, od:"WH1-WH2"},
+    {id:"T2", origin:"WH2", destination:"WH3", status:"On-Time", delay_hours:0, units:3, speed_kmph:55, od:"WH2-WH3"},
+    {id:"T3", origin:"WH3", destination:"WH1", status:"On-Time", delay_hours:0, units:3, speed_kmph:55, od:"WH3-WH1"}
+  ],
+  policies:{ capacity_units:10, default_speed_kmph:55, use_hub:false }
 };
 
-/* -------------------- 5 clean disruption steps w/ logical reroutes ---------- */
-const STEPS=[
-  { // D1: Delhi–Mumbai reroute via Hyderabad
-    id:"D1",
-    route:["WH1","WH2"],
-    reroute:[["WH1","WH4"],["WH4","WH2"]],
-    cause:[
-      "Disruption one.",
-      "Delhi to Mumbai corridor is closed near Rajasthan.",
-      "All trucks on this corridor are safely paused.",
-      "Please click the Correct button to apply the AI fix."
-    ],
-    fix:[
-      "AI has corrected the disruption.",
-      "Traffic is rerouted via Hyderabad: Delhi to Hyderabad, then Hyderabad to Mumbai.",
-      "Green links show the new safe detour. Flows are resuming."
-    ]
-  },
-  { // D2: Delhi–Hyderabad reroute via Mumbai
-    id:"D2",
-    route:["WH1","WH4"],
-    reroute:[["WH1","WH2"],["WH2","WH4"]],
-    cause:[
-      "Disruption two.",
-      "Delhi to Hyderabad is impacted by a long work zone.",
-      "All trucks on this corridor are paused in place.",
-      "Click Correct to rebalance via Mumbai."
-    ],
-    fix:[
-      "AI has corrected the disruption.",
-      "We are diverting Delhi to Mumbai, and then Mumbai to Hyderabad.",
-      "Green segments confirm the balanced detour is active."
-    ]
-  },
-  { // D3: Kolkata–Mumbai reroute via Hyderabad
-    id:"D3",
-    route:["WH5","WH2"],
-    reroute:[["WH5","WH4"],["WH4","WH2"]],
-    cause:[
-      "Disruption three.",
-      "Kolkata to Mumbai is constrained by flood-prone sections.",
-      "All trucks on this link are held.",
-      "Click Correct to divert through Hyderabad."
-    ],
-    fix:[
-      "AI has corrected the disruption.",
-      "We route Kolkata to Hyderabad and onward to Mumbai.",
-      "Green links indicate the detour now in effect."
-    ]
-  },
-  { // D4: Mumbai–Bangalore reroute via Hyderabad
-    id:"D4",
-    route:["WH2","WH3"],
-    reroute:[["WH2","WH4"],["WH4","WH3"]],
-    cause:[
-      "Disruption four.",
-      "Mumbai to Bangalore faces a crash-related closure.",
-      "All trucks on this corridor are paused.",
-      "Click Correct to go via Hyderabad."
-    ],
-    fix:[
-      "AI has corrected the disruption.",
-      "Detour is Mumbai to Hyderabad, then Hyderabad to Bangalore.",
-      "Green links show the new route. Queues are clearing."
-    ]
-  },
-  { // D5: Kolkata–Bangalore reroute via Hyderabad
-    id:"D5",
-    route:["WH5","WH3"],
-    reroute:[["WH5","WH4"],["WH4","WH3"]],
-    cause:[
-      "Final disruption.",
-      "Kolkata to Bangalore is blocked due to a landslide risk.",
-      "All trucks on this corridor are paused.",
-      "Click Correct to proceed with the safe detour."
-    ],
-    fix:[
-      "AI has corrected the disruption.",
-      "We divert Kolkata to Hyderabad and then Hyderabad to Bangalore.",
-      "Green links confirm stable flow on the detour."
-    ]
-  }
+/* -------------------- Disruption steps (unchanged) -------------------- */
+const STEPS=[ /* (same as your current steps) */
+  {id:"D1",route:["WH1","WH2"],reroute:[["WH1","WH4"],["WH4","WH2"]],
+   cause:["Disruption one.","Delhi to Mumbai corridor is closed near Rajasthan.","All trucks on this corridor are safely paused.","Please click the Correct button to apply the AI fix."],
+   fix:["AI has corrected the disruption.","Traffic is rerouted via Hyderabad: Delhi to Hyderabad, then Hyderabad to Mumbai.","Green links show the new safe detour. Flows are resuming."]},
+  {id:"D2",route:["WH1","WH4"],reroute:[["WH1","WH2"],["WH2","WH4"]],
+   cause:["Disruption two.","Delhi to Hyderabad is impacted by a long work zone.","All trucks on this corridor are paused in place.","Click Correct to rebalance via Mumbai."],
+   fix:["AI has corrected the disruption.","We are diverting Delhi to Mumbai, and then Mumbai to Hyderabad.","Green segments confirm the balanced detour is active."]},
+  {id:"D3",route:["WH5","WH2"],reroute:[["WH5","WH4"],["WH4","WH2"]],
+   cause:["Disruption three.","Kolkata to Mumbai is constrained by flood-prone sections.","All trucks on this link are held.","Click Correct to divert through Hyderabad."],
+   fix:["AI has corrected the disruption.","We route Kolkata to Hyderabad and onward to Mumbai.","Green links indicate the detour now in effect."]},
+  {id:"D4",route:["WH2","WH3"],reroute:[["WH2","WH4"],["WH4","WH3"]],
+   cause:["Disruption four.","Mumbai to Bangalore faces a crash-related closure.","All trucks on this corridor are paused.","Click Correct to go via Hyderabad."],
+   fix:["AI has corrected the disruption.","Detour is Mumbai to Hyderabad, then Hyderabad to Bangalore.","Green links show the new route. Queues are clearing."]},
+  {id:"D5",route:["WH5","WH3"],reroute:[["WH5","WH4"],["WH4","WH3"]],
+   cause:["Final disruption.","Kolkata to Bangalore is blocked due to a landslide risk.","All trucks on this corridor are paused.","Click Correct to proceed with the safe detour."],
+   fix:["AI has corrected the disruption.","We divert Kolkata to Hyderabad and then Hyderabad to Bangalore.","Green links confirm stable flow on the detour."]}
 ];
 
 /* -------------------- Map setup -------------------- */
@@ -399,10 +348,11 @@ const ChatUI = (() => {
     input.value = '';
     const cmd = raw.toLowerCase();
     if(onCommand){
-      if(cmd === 'disrupt' || cmd === 'correct' || cmd === 'normal'){
+      if(cmd === 'disrupt' || cmd === 'correct' || cmd === 'normal' ||
+         cmd === 'hub' || cmd === 'add hub' || cmd === 'hub addition' || cmd === 'nagpur hub'){
         onCommand(cmd);
       } else {
-        pushBubble('Valid commands: Disrupt, Correct, Normal.', 'system');
+        pushBubble('Valid commands: Disrupt, Correct, Normal, Hub Addition.', 'system');
       }
     }
   }
@@ -415,11 +365,8 @@ const ChatUI = (() => {
     muteBtn.textContent = muted ? '🔇 Unmute' : '🔊 Mute';
     Narrator.setMuted(muted);
   });
-  clearBtn.addEventListener('click', ()=>{
-    msgs.innerHTML = '';
-  });
+  clearBtn.addEventListener('click', ()=>{ msgs.innerHTML = ''; });
 
-  // keyboard: Ctrl+M toggles mute
   document.addEventListener('keydown', (e)=>{
     if((e.ctrlKey||e.metaKey) && (e.key==='m' || e.key==='M')){
       e.preventDefault();
@@ -458,7 +405,6 @@ const Narrator = (() => {
     let t=0;
     lines.forEach(line=>{
       const d=Math.max(1700,48*line.length);
-      // append immediately and then optionally speak
       ChatUI.appendSystem(line);
       ttsTimers.push(setTimeout(()=>speakOnce(line, rate), t));
       t += d + gap;
@@ -479,16 +425,8 @@ const Narrator = (() => {
   };
 })();
 
-/* -------------------- scenario + REAL stats -------------------- */
-async function fetchOrDefault(file, fallback){
-  try{ const r=await fetch(`${file}?v=${Date.now()}`,{cache:"no-store"}); if(!r.ok) throw new Error(`HTTP ${r.status}`); return await r.json(); }
-  catch(e){ debug(`Using default scenario (${e.message})`); return fallback; }
-}
-
-const baseStats={};     // BEFORE snapshot (Σ)
-let beforeStats=null;   // computed from BEFORE JSON
-let afterStats=null;    // computed from AFTER JSON
-
+/* -------------------- stats table helpers -------------------- */
+const baseStats={}; let beforeStats=null; let afterStats=null; let hubStats=null;
 function computeStatsFromScenario(scn){
   const inC={}, outC={};
   (scn.trucks||[]).forEach(t=>{ outC[t.origin]=(outC[t.origin]||0)+1; inC[t.destination]=(inC[t.destination]||0)+1; });
@@ -498,7 +436,6 @@ function computeStatsFromScenario(scn){
   });
   return stats;
 }
-
 function renderStatsTable(pred){
   const tbody=document.querySelector("#statsTable tbody"); if(!tbody) return; tbody.innerHTML="";
   for(const id of Object.keys(CITY)){
@@ -509,36 +446,84 @@ function renderStatsTable(pred){
   }
 }
 
-function copyStats(src){ const out={}; for(const k of Object.keys(src)) out[k]={...src[k]}; return out; }
-
-function deltaFromDelayedTrucks(scnBefore){
-  const dByWh={}; Object.keys(CITY).forEach(id=>dByWh[id]=0);
-  for(const t of (scnBefore.trucks||[])){
-    const isDelayed=(t.status||"").toLowerCase()==="delayed" || (t.delay_hours||0)>0;
-    if(isDelayed) dByWh[t.origin]-=1;
-  }
-  return dByWh;
+/* -------------------- metrics for Hub demo -------------------- */
+function haversineKm(a,b){
+  const toRad=v=>v*Math.PI/180;
+  const R=6371;
+  const dLat=toRad(b[0]-a[0]), dLon=toRad(b[1]-a[1]);
+  const lat1=toRad(a[0]), lat2=toRad(b[0]);
+  const x=Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(x));
 }
+function pathDistanceKm(ids){
+  const pts=expandIDsToLatLon(ids);
+  let d=0; for(let i=0;i<pts.length-1;i++) d+=haversineKm([pts[i][0],pts[i][1]],[pts[i+1][0],pts[i+1][1]]);
+  return d;
+}
+function truckDistanceKm(tr){
+  return pathDistanceKm([tr.origin, tr.destination]);
+}
+function truckDriveMin(tr, scn){
+  const speed = tr.speed_kmph || scn?.policies?.default_speed_kmph || DEFAULT_SPEED_KMPH;
+  const km = truckDistanceKm(tr);
+  return (km / speed) * 60;
+}
+function weightedStats(samples){
+  // samples: [{min: minutes, w: units}, ...]
+  const totalW = samples.reduce((s,x)=>s+(x.w||1),0) || 1;
+  const mean = samples.reduce((s,x)=>s+(x.min*(x.w||1)),0)/totalW;
+  const arr=[...samples].sort((a,b)=>a.min-b.min);
+  let acc=0, p90T=0; const target=0.9*totalW;
+  for(const x of arr){ acc += (x.w||1); if(acc>=target){ p90T=x.min; break; } }
+  return { mean, p90:p90T, totalW };
+}
+function summarizeScenario(scn){
+  const cap = scn?.policies?.capacity_units ?? DEFAULT_CAPACITY_UNITS;
+  const useHub = !!(scn?.policies?.use_hub);
+  const dwell = scn?.policies?.hub_dwell_min ?? 0;
+  const batch = scn?.policies?.consolidation_window_min ?? 0;
+  const movements = (scn.trucks||[]).length;
+  const truckKm = (scn.trucks||[]).reduce((s,t)=>s+truckDistanceKm(t),0);
 
-function applyDeltaToStats(base, deltaCounts, invShiftPerTruck=10){
-  const out=copyStats(base);
-  for(const wh of Object.keys(deltaCounts)){
-    const d=deltaCounts[wh];
-    if(d<0){
-      out[wh].out=Math.max(0,(out[wh].out||0)+d);
-      out[wh].inv=(out[wh].inv||0)+(-d)*invShiftPerTruck;
-    } else if(d>0){
-      out[wh].out=(out[wh].out||0)+d;
-      out[wh].inv=Math.max(0,(out[wh].inv||0)-d*invShiftPerTruck);
+  let samples=[]; // OD-level minutes, weighted by units
+  if(useHub || (scn.trucks||[]).some(t=>t.origin===HUB_ID||t.destination===HUB_ID)){
+    const byOD = new Map();
+    for(const t of (scn.trucks||[])){
+      const od=t.od||`${t.origin}-${t.destination}`;
+      if(!byOD.has(od)) byOD.set(od,{out:[],ino:[]});
+      if(t.destination===HUB_ID) byOD.get(od).out.push(t);
+      else if(t.origin===HUB_ID) byOD.get(od).ino.push(t);
+      else {
+        // if any direct legs sneak in, treat as full OD by themselves
+        samples.push({min:truckDriveMin(t, scn), w:t.units||1});
+      }
+    }
+    for(const [od,legs] of byOD){
+      const n=Math.min(legs.out.length, legs.ino.length);
+      for(let i=0;i<n;i++){
+        const a=legs.out[i], b=legs.ino[i];
+        const units=Math.min(a.units||1, b.units||1);
+        const min=truckDriveMin(a, scn)+truckDriveMin(b, scn)+dwell+batch;
+        samples.push({min, w:units});
+      }
+    }
+  } else {
+    for(const t of (scn.trucks||[])){
+      samples.push({min:truckDriveMin(t, scn), w:t.units||1});
     }
   }
-  return out;
-}
 
-/* -------------------- pause / reroute control -------------------- */
+  const {mean, p90, totalW} = weightedStats(samples.length? samples : [{min:0,w:1}]);
+  const util = (scn.trucks||[]).reduce((s,t)=>s+((t.units||0)/cap),0) / Math.max(1,(scn.trucks||[]).length);
+
+  return { movements, truckKm, meanEta:minRound(mean), p90Eta:minRound(p90), utilization:Math.round(util*100), totalUnits:totalW };
+}
+function minRound(x){ return Math.round(x); }
+function pctDelta(a,b){ if(a===0) return 0; return Math.round((b-a)/a*100); }
+
+/* -------------------- pause / reroute control (unchanged) -------------------- */
 function odMatch(ids,o,d){ const a=ids[0], b=ids[ids.length-1]; return (a===o&&b===d)||(a===d&&b===o); }
 function setTruckPath(T,latlon,toMid=false){ if(!latlon||latlon.length<2) return; T.latlon=latlon; T.seg=0; T.dir=1; T.t=toMid?0.5:0.0; }
-
 function pauseAllOnRoute(step){
   const ids=step.route; const latlon=expandIDsToLatLon(ids);
   let paused=0;
@@ -572,15 +557,18 @@ function reroutePaused(step){
   return released;
 }
 
-/* -------------------- state machine: normal | disrupt | fixed -------------- */
+/* -------------------- state machine -------------------- */
 let mode="normal"; let currentStepIdx=-1;
-
-function featureFor(ids){ return {type:"Feature",properties:{id:ids.join("-")},geometry:{type:"LineString",coordinates:toLonLat(expandIDsToLatLon(ids))}}; }
-function setAlert(ids){ setSourceFeatures("alert",[featureFor(ids)]); }
+function setAlert(ids){ setSourceFeatures("alert",[featureForRoute(ids)]); }
 function clearAlert(){ setSourceFeatures("alert",[]); }
-function setFix(pairs){ setSourceFeatures("fix",(pairs||[]).map(pair=>featureFor(pair))); }
+function setFix(pairs){ setSourceFeatures("fix",(pairs||[]).map(pair=>featureForRoute(pair))); }
 function clearFix(){ setSourceFeatures("fix",[]); }
 
+/* -------------------- scenario activation helpers -------------------- */
+function activateTrucksFromScenario(scn){
+  trucks.length=0; truckNumberById.clear();
+  (scn.trucks||[]).forEach((t,i)=>spawnTruck(t,i));
+}
 function startDisrupt(){
   if(mode==="disrupt"){
     Narrator.sayLinesTwice(["A disruption is already active. Please click the Correct button to proceed."],900,0.92);
@@ -588,58 +576,87 @@ function startDisrupt(){
   }
   currentStepIdx = (currentStepIdx + 1) % STEPS.length;
   const step=STEPS[currentStepIdx];
-
   clearFix(); setAlert(step.route);
   pauseAllOnRoute(step);
 
-  const deltaCounts=deltaFromDelayedTrucks(SCN_BEFORE||{trucks:[]});
-  const pred=applyDeltaToStats(beforeStats, deltaCounts, 10);
-  renderStatsTable(pred);
-
-  // no auto-centering (fitToRoute) here
-
-  Narrator.sayLinesTwice([
-    ...step.cause,
-    "Once you are ready, please click the Correct button."
-  ], 950, 0.9);
-
+  const deltaCounts=(SCN_BEFORE?.trucks||[]).reduce((m,t)=>{
+    const delayed=(t.status||"").toLowerCase()==="delayed" || (t.delay_hours||0)>0;
+    if(delayed) m[t.origin]=(m[t.origin]||0)-1;
+    return m;
+  },{});
+  renderStatsTable(applyDeltaToStats(beforeStats, deltaCounts, 10));
+  Narrator.sayLinesTwice([...step.cause,"Once you are ready, please click the Correct button."], 950, 0.9);
   mode="disrupt";
 }
-
 function applyCorrect(){
   if(mode!=="disrupt"){
     Narrator.sayLinesTwice(["No active disruption. Click Disrupt first."],800,0.95);
     return;
   }
   const step=STEPS[currentStepIdx];
-
-  clearAlert();
-  setFix(step.reroute);
+  clearAlert(); setFix(step.reroute);
   reroutePaused(step);
-
   renderStatsTable(afterStats);
-
-  // no auto-centering (fitToRoute) here
-
   Narrator.sayLinesTwice(step.fix, 950, 0.92);
   mode="fixed";
 }
-
 function backToNormal(){
   Narrator.clear();
   clearAlert(); clearFix();
-  unpauseAll(true);
+  activateTrucksFromScenario(SCN_BEFORE);
   renderStatsTable(beforeStats);
   Narrator.sayLinesTwice(["Returning to normal operations. All corridors white and flowing."], 900, 0.95);
   mode="normal";
 }
 
-/* -------------------- camera helpers -------------------- */
+/* helpers reused */
+function copyStats(src){ const out={}; for(const k of Object.keys(src)) out[k]={...src[k]}; return out; }
+function applyDeltaToStats(base, deltaCounts, invShiftPerTruck=10){
+  const out=copyStats(base);
+  for(const wh of Object.keys(deltaCounts||{})){
+    const d=deltaCounts[wh]||0;
+    if(d<0){ out[wh].out=Math.max(0,(out[wh].out||0)+d); out[wh].inv=(out[wh].inv||0)+(-d)*invShiftPerTruck; }
+    else if(d>0){ out[wh].out=(out[wh].out||0)+d; out[wh].inv=Math.max(0,(out[wh].inv||0)-d*invShiftPerTruck); }
+  }
+  return out;
+}
+
+/* -------------------- Hub Addition flow -------------------- */
+function hubAddition(){
+  if(!SCN_HUB){
+    Narrator.sayLinesTwice(["Hub scenario not found in scenario_after.json (key 'hub')."], 800, 0.95);
+    return;
+  }
+  Narrator.clear(); clearAlert(); clearFix();
+  // swap trucks to hub scenario
+  activateTrucksFromScenario(SCN_HUB);
+  renderStatsTable(hubStats||beforeStats);
+
+  // compute and narrate deltas
+  const baseS = summarizeScenario(SCN_BEFORE);
+  const hubS  = summarizeScenario(SCN_HUB);
+  const movDelta = pctDelta(baseS.movements, hubS.movements);
+  const kmDelta  = pctDelta(baseS.truckKm, hubS.truckKm);
+  const etaDelta = hubS.meanEta - baseS.meanEta;
+  const p90Delta = hubS.p90Eta  - baseS.p90Eta;
+  const utilDelta= hubS.utilization - baseS.utilization;
+
+  const dwell = SCN_HUB?.policies?.hub_dwell_min ?? 0;
+  const batch = SCN_HUB?.policies?.consolidation_window_min ?? 0;
+
+  const lines=[
+    "Hub Addition engaged — evaluating Nagpur as a consolidation hub.",
+    `Movements ${movDelta<0?"↓":"↑"}${Math.abs(movDelta)}% (${baseS.movements} → ${hubS.movements}); Truck-km ${kmDelta<0?"↓":"↑"}${Math.abs(kmDelta)}%.`,
+    `Mean O→D ETA ${etaDelta>=0?"+":""}${etaDelta} min; p90 ${p90Delta>=0?"+":""}${p90Delta} min (includes hub dwell ${dwell}m${batch?` + consolidation ${batch}m`:""}).`,
+    `Average utilization ${hubS.utilization}% (${utilDelta>=0?"+":""}${utilDelta} pp vs baseline).`
+  ];
+  Narrator.sayLinesTwice(lines, 850, 0.92);
+  mode="hub";
+}
+
+/* -------------------- camera helper (kept, unused) -------------------- */
 function fitToRoute(idsOrPairs){
-  // kept for future use; currently unused because AUTO_FIT=false
-  const pts = Array.isArray(idsOrPairs[0])
-    ? expandIDsToLatLon(idsOrPairs.flat())
-    : expandIDsToLatLon(idsOrPairs);
+  const pts = Array.isArray(idsOrPairs[0]) ? expandIDsToLatLon(idsOrPairs.flat()) : expandIDsToLatLon(idsOrPairs);
   const b=new maplibregl.LngLatBounds();
   pts.forEach(p=>b.extend([p[1],p[0]]));
   map.fitBounds(b,{padding:{top:60,left:60,right:320,bottom:60},duration:700,maxZoom:6.9});
@@ -651,7 +668,7 @@ const mapReady=new Promise(res=>map.on("load",res));
   await mapReady;
   ensureCanvas(); ensureRoadLayers();
 
-  // rename & add buttons
+  // top-left buttons
   const ui=document.getElementById("ui")||document.body;
   const btnBefore=document.getElementById("btnBefore");
   const btnAfter=document.getElementById("btnAfter");
@@ -665,42 +682,60 @@ const mapReady=new Promise(res=>map.on("load",res));
     btnNormal.style.marginLeft="8px";
     ui.appendChild(btnNormal);
   }
+  let btnHub=document.getElementById("btnHub");
+  if(!btnHub){
+    btnHub=document.createElement("button");
+    btnHub.id="btnHub"; btnHub.textContent="Hub Addition";
+    btnHub.style.marginLeft="8px";
+    ui.appendChild(btnHub);
+  }
 
-  // wire buttons → flows
+  // wire buttons
   if(btnBefore) btnBefore.onclick=()=>startDisrupt();
   if(btnAfter)  btnAfter.onclick =()=>applyCorrect();
   btnNormal.onclick=()=>backToNormal();
+  btnHub.onclick=()=>hubAddition();
 
   // wire chat commands
   ChatUI.onCommand((cmd)=>{
     if(cmd==='disrupt') startDisrupt();
     else if(cmd==='correct') applyCorrect();
     else if(cmd==='normal') backToNormal();
+    else if(cmd==='hub' || cmd==='add hub' || cmd==='hub addition' || cmd==='nagpur hub') hubAddition();
   });
 
-  // load REAL scenarios
+  // load scenarios
   SCN_BEFORE = await fetchOrDefault("scenario_before.json", DEFAULT_BEFORE);
-  SCN_AFTER  = await fetchOrDefault("scenario_after.json",  DEFAULT_BEFORE);
+  const afterRaw = await fetchOrDefault("scenario_after.json", DEFAULT_BEFORE);
+  // keep your corrected scenario as SCN_AFTER; pull hub demo (if present)
+  SCN_AFTER = { warehouses: afterRaw.warehouses, trucks: afterRaw.trucks, policies: afterRaw.policies||{} };
+  SCN_HUB   = afterRaw.hub ? { warehouses: afterRaw.hub.warehouses, trucks: afterRaw.hub.trucks, policies: afterRaw.hub.policies } : null;
 
-  // compute REAL stats snapshots
+  // compute stats snapshots
   beforeStats = computeStatsFromScenario(SCN_BEFORE);
   afterStats  = computeStatsFromScenario(SCN_AFTER);
+  hubStats    = SCN_HUB ? computeStatsFromScenario(SCN_HUB) : null;
   Object.assign(baseStats, beforeStats);
 
   // spawn trucks from BEFORE scenario
-  trucks.length=0; truckNumberById.clear();
-  (SCN_BEFORE.trucks||[]).forEach((t,i)=>spawnTruck(t,i));
+  activateTrucksFromScenario(SCN_BEFORE);
 
-  // initial camera — symmetric padding (no chat offset)
+  // initial camera — symmetric padding (no chat-dependent offset)
   const b=new maplibregl.LngLatBounds(); Object.values(CITY).forEach(c=>b.extend([c.lon,c.lat]));
   map.fitBounds(b,{padding:{top:60,left:60,right:320,bottom:60},duration:800,maxZoom:6.8});
 
-  // start clean — show BEFORE stats and welcome line
+  // start clean
   renderStatsTable(beforeStats);
-  backToNormal(); // speaks "Returning to normal..." twice
-
-  ChatUI.appendSystem("Type Disrupt, Correct, or Normal here to drive the simulation. 🔊 Toggle narration with the Mute button or press Ctrl+M.");
+  Narrator.sayLinesTwice([
+    "Type Disrupt, Correct, Normal — or Hub Addition — to drive the simulation.",
+    "🔊 Toggle narration with the Mute button or press Ctrl+M."
+  ]);
 })();
 
+/* -------------------- fetch helper & tick -------------------- */
+async function fetchOrDefault(file, fallback){
+  try{ const r=await fetch(`${file}?v=${Date.now()}`,{cache:"no-store"}); if(!r.ok) throw new Error(`HTTP ${r.status}`); return await r.json(); }
+  catch(e){ debug(`Using default scenario (${e.message})`); return fallback; }
+}
 function tick(){ const now=performance.now(); const dt=Math.min(0.05,(now-__lastTS)/1000); __lastTS=now; __dt=dt; drawFrame(); requestAnimationFrame(tick); }
 requestAnimationFrame(tick);
