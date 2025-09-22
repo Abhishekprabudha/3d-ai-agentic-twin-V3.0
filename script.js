@@ -1,8 +1,7 @@
 /* =========================================================================
-   Agentic Twin — Disrupt → Correct → Normal + Hub Addition (v5.2)
-   Enhancements in this patch:
-   - Hub narration replay waits for the first pass to FINISH (onend-based)
-   - Safe fallback timer if TTS is muted or onend isn’t delivered
+   Agentic Twin — Disrupt → Correct → Normal + Hub Addition (v5.3)
+   - Fix: remove duplicate helper declarations that broke parsing
+   - Replay waits for first pass to finish (onend-based), with fallback timer
    ======================================================================= */
 
 /* -------------------- tiny debug pill -------------------- */
@@ -166,14 +165,14 @@ function ensureRoadLayers(){
       layout:{"line-cap":"round","line-join":"round"}});
   }
 
-  if(!map.getSource("alert")) map.addSource("alert",{type:"geojson",data:{type:"FeatureCollection",features:[]}})
+  if(!map.getSource("alert")) map.addSource("alert",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
   if(!map.getLayer("alert-red")){
     map.addLayer({id:"alert-red",type:"line",source:"alert",
       paint:{"line-color":"#ff6b6b","line-opacity":0.98,"line-width":4.6},
       layout:{"line-cap":"round","line-join":"round"}});
   }
 
-  if(!map.getSource("fix")) map.addSource("fix",{type:"geojson",data:{type:"FeatureCollection",features:[]}})
+  if(!map.getSource("fix")) map.addSource("fix",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
   if(!map.getLayer("fix-green")){
     map.addLayer({id:"fix-green",type:"line",source:"fix",
       paint:{"line-color":"#00d08a","line-opacity":0.98,"line-width":5.8},
@@ -455,7 +454,6 @@ const Narrator = (() => {
 
     const dur = queue(lines, gap, rate, ()=>{
       doneFired = true;
-      // start second pass a hair after the LAST utterance actually ended
       replayTimer = setTimeout(()=>{ queue(lines, gap, rate); }, 350);
     });
 
@@ -496,7 +494,7 @@ function renderStatsTable(pred){
   }
 }
 
-/* -------------------- metrics for Hub demo -------------------- */
+/* -------------------- metrics & formatters for Hub demo -------------------- */
 function haversineKm(a,b){
   const toRad=v=>v*Math.PI/180, R=6371;
   const dLat=toRad(b[0]-a[0]), dLon=toRad(b[1]-a[1]);
@@ -509,9 +507,7 @@ function pathDistanceKm(ids){
   let d=0; for(let i=0;i<pts.length-1;i++) d+=haversineKm([pts[i][0],pts[i][1]],[pts[i+1][0],pts[i+1][1]]);
   return d;
 }
-function truckDistanceKm(tr){
-  return pathDistanceKm([tr.origin, tr.destination]);
-}
+function truckDistanceKm(tr){ return pathDistanceKm([tr.origin, tr.destination]); }
 function truckDriveMin(tr, scn){
   const speed = tr.speed_kmph || scn?.policies?.default_speed_kmph || DEFAULT_SPEED_KMPH;
   const km = truckDistanceKm(tr);
@@ -562,12 +558,10 @@ function summarizeScenario(scn){
   return { movements, truckKm, meanEta:minRound(mean), p90Eta:minRound(p90), utilization:Math.round(util*100), totalUnits:totalW };
 }
 function minRound(x){ return Math.round(x); }
-
-/* ----- human-friendly formatters for narration ----- */
 const fmtInt = (n)=>Math.round(n).toLocaleString("en-US");
 const roundKm = (km)=>Math.round(km/10)*10;
 const fmtKm = (km)=>`${fmtInt(roundKm(km))} kilometers`;
-const toHours1 = (min)=> (Math.round((min/60)*10)/10); // 1 decimal
+const toHours1 = (min)=> (Math.round((min/60)*10)/10);
 
 /* -------------------- pause / reroute control -------------------- */
 function odMatch(ids,o,d){ const a=ids[0], b=ids[ids.length-1]; return (a===o&&b===d)||(a===d&&b===o); }
@@ -620,7 +614,7 @@ function startDisrupt(){
     Narrator.sayLinesTwice(["A disruption is already active. Please click the Correct button to proceed."],900,0.92);
     return;
   }
-  SHOW_HUB=false; refreshRoadNetwork(); // hide hub spokes
+  SHOW_HUB=false; refreshRoadNetwork();
   currentStepIdx = (currentStepIdx + 1) % STEPS.length;
   const step=STEPS[currentStepIdx];
   clearFix(); setAlert(step.route);
@@ -640,7 +634,7 @@ function applyCorrect(){
     Narrator.sayLinesTwice(["No active disruption. Click Disrupt first."],800,0.95);
     return;
   }
-  SHOW_HUB=false; refreshRoadNetwork(); // hide hub spokes
+  SHOW_HUB=false; refreshRoadNetwork();
   const step=STEPS[currentStepIdx];
   clearAlert(); setFix(step.reroute);
   reroutePaused(step);
@@ -649,7 +643,7 @@ function applyCorrect(){
   mode="fixed";
 }
 function backToNormal(){
-  SHOW_HUB=false; refreshRoadNetwork(); // hide hub spokes
+  SHOW_HUB=false; refreshRoadNetwork();
   Narrator.clear();
   clearAlert(); clearFix();
   activateTrucksFromScenario(SCN_BEFORE);
@@ -671,7 +665,6 @@ function applyDeltaToStats(base, deltaCounts, invShiftPerTruck=10){
 }
 
 /* -------------------- Hub Addition flow (human narration) ------------------- */
-function toHours1(min){ return Math.round((min/60)*10)/10; } // re-declared for local usage
 function pctDeltaHuman(base, now){
   if(base===0) return {dir:"changed", pct:0};
   const d = Math.round(Math.abs((now-base)/base*100));
@@ -683,9 +676,6 @@ function ppDeltaHuman(basePct, nowPct){
   const dir = (d<0) ? "decreased" : "increased";
   return {dir, pp:Math.abs(d)};
 }
-function fmtInt(n){ return Math.round(n).toLocaleString("en-US"); }
-function roundKm(km){ return Math.round(km/10)*10; }
-function fmtKm(km){ return `${fmtInt(roundKm(km))} kilometers`; }
 
 function hubAddition(){
   if(!SCN_HUB){
@@ -694,14 +684,11 @@ function hubAddition(){
   }
   Narrator.clear(); clearAlert(); clearFix();
 
-  // show hub spokes & marker
   SHOW_HUB=true; refreshRoadNetwork();
 
-  // swap trucks to hub scenario and update dashboard
   activateTrucksFromScenario(SCN_HUB);
   renderStatsTable(hubStats||beforeStats);
 
-  // compute deltas
   const baseS = summarizeScenario(SCN_BEFORE);
   const hubS  = summarizeScenario(SCN_HUB);
 
