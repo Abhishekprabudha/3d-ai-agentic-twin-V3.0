@@ -1,9 +1,11 @@
 /* =========================================================================
-   Agentic Twin — Disrupt → Correct → Normal + Hub Addition (v5)
-   - Left chat panel + narration (mute supported)
-   - New "Hub Addition" mode: compares Nagpur hub vs P2P baseline
-   - Computes & narrates: Movements, Truck-km, Mean/p90 OD ETA, Utilization
-   - No auto-centering; camera behavior unchanged from your v4.1
+   Agentic Twin — Disrupt → Correct → Normal + Hub Addition (v5.1)
+   Enhancements:
+   - Hub node drawn at Nagpur only in Hub mode
+   - Hub spokes appear only in Hub mode (baseline network unchanged)
+   - Human-sounding narration (percent, from→to, hours)
+   - Times reported in hours (1 decimal)
+   - No camera auto-centering (same as your v4.1)
    ======================================================================= */
 
 /* -------------------- tiny debug pill -------------------- */
@@ -35,6 +37,7 @@ const CITY={
   WH4:{name:"WH4 — Hyderabad", lat:17.3850, lon:78.4867},
   WH5:{name:"WH5 — Kolkata",   lat:22.5726, lon:88.3639}
 };
+const HUB={ H_NAG:{name:"Hub — Nagpur", lat:21.1458, lon:79.0882} };
 
 /* -------------------- route polylines (lat,lon) -------------------- */
 const RP={
@@ -49,7 +52,7 @@ const RP={
   "WH5-WH2":[[22.5726,88.3639],[23.5,86.0],[22.5,84.0],[21.5,81.5],[21.1,79.0],[20.3,76.5],[19.3,74.5],[19.0760,72.8777]],
   "WH5-WH3":[[22.5726,88.3639],[21.15,85.8],[19.5,85.8],[17.9,82.7],[16.5,80.3],[13.3409,77.1010],[12.9716,77.5946]]
 };
-/* Hub spokes (Nagpur 21.1458, 79.0882) */
+/* Hub spokes (Nagpur 21.1458, 79.0882) — included only in Hub mode */
 RP["WH1-H_NAG"]=[[28.6139,77.2090],[26.5,78.2],[24.7,79.0],[22.8,79.2],[21.1458,79.0882]];
 RP["WH2-H_NAG"]=[[19.0760,72.8777],[19.6,74.8],[20.2,76.9],[20.7,78.4],[21.1458,79.0882]];
 RP["WH3-H_NAG"]=[[12.9716,77.5946],[14.6,78.6],[16.8,79.3],[19.0,79.4],[21.1458,79.0882]];
@@ -62,7 +65,10 @@ function getRoadLatLon(a,b){
   const k1=keyFor(a,b), k2=keyFor(b,a);
   if(RP[k1]) return RP[k1];
   if(RP[k2]) return [...RP[k2]].reverse();
-  return [[CITY[a]?.lat??21.1458,CITY[a]?.lon??79.0882],[CITY[b]?.lat??21.1458,CITY[b]?.lon??79.0882]];
+  // fallback coords if unseen ID is the hub
+  const ca=(CITY[a]||HUB[a])||{lat:21.1458,lon:79.0882};
+  const cb=(CITY[b]||HUB[b])||{lat:21.1458,lon:79.0882};
+  return [[ca.lat,ca.lon],[cb.lat,cb.lon]];
 }
 function expandIDsToLatLon(ids){
   const out=[];
@@ -73,8 +79,10 @@ function expandIDsToLatLon(ids){
   }
   return out;
 }
-function networkGeoJSON(){
-  const keys=Object.keys(RP);
+
+/* Build base network; when includeHub=false, hide hub spokes */
+function networkGeoJSON(includeHub){
+  const keys=Object.keys(RP).filter(k=> includeHub || !k.includes("H_NAG"));
   return {type:"FeatureCollection",features:keys.map(k=>({
     type:"Feature",properties:{id:k},geometry:{type:"LineString",coordinates:toLonLat(RP[k])}
   }))};
@@ -94,8 +102,8 @@ const DEFAULT_BEFORE={
   policies:{ capacity_units:10, default_speed_kmph:55, use_hub:false }
 };
 
-/* -------------------- Disruption steps (unchanged) -------------------- */
-const STEPS=[ /* (same as your current steps) */
+/* -------------------- Disruption steps (as in your build) -------------------- */
+const STEPS=[
   {id:"D1",route:["WH1","WH2"],reroute:[["WH1","WH4"],["WH4","WH2"]],
    cause:["Disruption one.","Delhi to Mumbai corridor is closed near Rajasthan.","All trucks on this corridor are safely paused.","Please click the Correct button to apply the AI fix."],
    fix:["AI has corrected the disruption.","Traffic is rerouted via Hyderabad: Delhi to Hyderabad, then Hyderabad to Mumbai.","Green links show the new safe detour. Flows are resuming."]},
@@ -145,8 +153,9 @@ function resizeCanvas(){
 window.addEventListener("resize",resizeCanvas);
 
 /* -------------------- base network + highlight layers -------------------- */
+let SHOW_HUB=false; // controls hub spokes & hub marker
 function ensureRoadLayers(){
-  const net=networkGeoJSON();
+  const net=networkGeoJSON(SHOW_HUB);
   if(!map.getSource("routes")) map.addSource("routes",{type:"geojson",data:net});
   else map.getSource("routes").setData(net);
 
@@ -177,6 +186,10 @@ function ensureRoadLayers(){
 
   try { map.moveLayer("fix-green"); } catch(e) {}
 }
+function refreshRoadNetwork(){
+  const src=map.getSource("routes");
+  if(src) src.setData(networkGeoJSON(SHOW_HUB));
+}
 
 /* helpers for sources */
 function featureForRoute(ids){
@@ -198,8 +211,19 @@ const sizeByZoom=z=>Math.max(WH_MIN,Math.min(WH_MAX, WH_BASE*(0.9+(z-5)*0.18)));
 function drawWarehouses(){
   if(!ctx) return; const z=map.getZoom();
   ctx.font="bold 11px system-ui, Segoe UI, Roboto, sans-serif";
+
+  // Always draw the five warehouses
   for(const id of Object.keys(CITY)){
     const c=CITY[id], p=map.project({lng:c.lon,lat:c.lat}), S=sizeByZoom(z);
+    if(WH_READY) ctx.drawImage(WH_IMG, p.x-S/2, p.y-S/2, S, S);
+    const label=c.name, pad=6, h=16, w=ctx.measureText(label).width+pad*2, py=p.y+S/2+12;
+    ctx.fillStyle="rgba(10,10,12,.78)"; ctx.fillRect(p.x-w/2,py-h/2,w,h);
+    ctx.fillStyle="#e8eef2"; ctx.textBaseline="middle"; ctx.fillText(label,p.x-w/2+pad,py);
+  }
+
+  // Draw the hub marker ONLY in Hub mode
+  if(SHOW_HUB){
+    const c=HUB[HUB_ID]; const p=map.project({lng:c.lon,lat:c.lat}); const S=sizeByZoom(z);
     if(WH_READY) ctx.drawImage(WH_IMG, p.x-S/2, p.y-S/2, S, S);
     const label=c.name, pad=6, h=16, w=ctx.measureText(label).width+pad*2, py=p.y+S/2+12;
     ctx.fillStyle="rgba(10,10,12,.78)"; ctx.fillRect(p.x-w/2,py-h/2,w,h);
@@ -390,17 +414,17 @@ const Narrator = (() => {
     ttsTimers.forEach(clearTimeout); ttsTimers=[];
     try{ synth?.cancel?.(); }catch(e){}
   }
-  function speakOnce(text, rate=0.9){
+  function speakOnce(text, rate=0.95){
     if(muted || !synth || !text) return;
     const u = new SpeechSynthesisUtterance(String(text));
     if(VOICE) u.voice = VOICE;
     u.rate = rate; u.pitch = 1.0; u.volume = 1.0;
     synth.speak(u);
   }
-  function measure(lines, rate=0.9, gap=950){
+  function measure(lines, rate=0.95, gap=950){
     let t=0; lines.forEach(line=>{ const d=Math.max(1700,48*line.length); t+=d+gap; }); return t;
   }
-  function queue(lines, gap=950, rate=0.9){
+  function queue(lines, gap=950, rate=0.95){
     clearTTS();
     let t=0;
     lines.forEach(line=>{
@@ -410,7 +434,7 @@ const Narrator = (() => {
       t += d + gap;
     });
   }
-  function queueTwice(lines, gap=950, rate=0.9){
+  function queueTwice(lines, gap=950, rate=0.95){
     clearTTS();
     const dur = measure(lines, rate, gap);
     queue(lines, gap, rate);
@@ -418,7 +442,7 @@ const Narrator = (() => {
   }
 
   return {
-    sayLinesTwice: (lines, gap=950, rate=0.9)=>queueTwice(lines, gap, rate),
+    sayLinesTwice: (lines, gap=950, rate=0.95)=>queueTwice(lines, gap, rate),
     sayOnce: (line)=>{ ChatUI.appendSystem(line); speakOnce(line); },
     clear: clearTTS,
     setMuted: (m)=>{ muted = !!m; if(muted) clearTTS(); }
@@ -448,8 +472,7 @@ function renderStatsTable(pred){
 
 /* -------------------- metrics for Hub demo -------------------- */
 function haversineKm(a,b){
-  const toRad=v=>v*Math.PI/180;
-  const R=6371;
+  const toRad=v=>v*Math.PI/180, R=6371;
   const dLat=toRad(b[0]-a[0]), dLon=toRad(b[1]-a[1]);
   const lat1=toRad(a[0]), lat2=toRad(b[0]);
   const x=Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
@@ -469,7 +492,6 @@ function truckDriveMin(tr, scn){
   return (km / speed) * 60;
 }
 function weightedStats(samples){
-  // samples: [{min: minutes, w: units}, ...]
   const totalW = samples.reduce((s,x)=>s+(x.w||1),0) || 1;
   const mean = samples.reduce((s,x)=>s+(x.min*(x.w||1)),0)/totalW;
   const arr=[...samples].sort((a,b)=>a.min-b.min);
@@ -485,7 +507,7 @@ function summarizeScenario(scn){
   const movements = (scn.trucks||[]).length;
   const truckKm = (scn.trucks||[]).reduce((s,t)=>s+truckDistanceKm(t),0);
 
-  let samples=[]; // OD-level minutes, weighted by units
+  let samples=[];
   if(useHub || (scn.trucks||[]).some(t=>t.origin===HUB_ID||t.destination===HUB_ID)){
     const byOD = new Map();
     for(const t of (scn.trucks||[])){
@@ -493,10 +515,7 @@ function summarizeScenario(scn){
       if(!byOD.has(od)) byOD.set(od,{out:[],ino:[]});
       if(t.destination===HUB_ID) byOD.get(od).out.push(t);
       else if(t.origin===HUB_ID) byOD.get(od).ino.push(t);
-      else {
-        // if any direct legs sneak in, treat as full OD by themselves
-        samples.push({min:truckDriveMin(t, scn), w:t.units||1});
-      }
+      else { samples.push({min:truckDriveMin(t, scn), w:t.units||1}); }
     }
     for(const [od,legs] of byOD){
       const n=Math.min(legs.out.length, legs.ino.length);
@@ -508,9 +527,7 @@ function summarizeScenario(scn){
       }
     }
   } else {
-    for(const t of (scn.trucks||[])){
-      samples.push({min:truckDriveMin(t, scn), w:t.units||1});
-    }
+    for(const t of (scn.trucks||[])) samples.push({min:truckDriveMin(t, scn), w:t.units||1});
   }
 
   const {mean, p90, totalW} = weightedStats(samples.length? samples : [{min:0,w:1}]);
@@ -519,23 +536,38 @@ function summarizeScenario(scn){
   return { movements, truckKm, meanEta:minRound(mean), p90Eta:minRound(p90), utilization:Math.round(util*100), totalUnits:totalW };
 }
 function minRound(x){ return Math.round(x); }
-function pctDelta(a,b){ if(a===0) return 0; return Math.round((b-a)/a*100); }
 
-/* -------------------- pause / reroute control (unchanged) -------------------- */
+/* ----- human-friendly formatters for narration ----- */
+const fmtInt = (n)=>Math.round(n).toLocaleString("en-US");
+const roundKm = (km)=>Math.round(km/10)*10;
+const fmtKm = (km)=>`${fmtInt(roundKm(km))} kilometers`;
+const toHours1 = (min)=> (Math.round((min/60)*10)/10); // 1 decimal
+const fmtHours = (min)=>`${toHours1(min)} hours`;
+function pctDeltaHuman(base, now){
+  if(base===0) return {dir:"changed", pct:0};
+  const d = Math.round(Math.abs((now-base)/base*100));
+  const dir = (now<base) ? "decreased" : "increased";
+  return {dir, pct:d};
+}
+function ppDeltaHuman(basePct, nowPct){
+  const d = Math.round(nowPct - basePct);
+  const dir = (d<0) ? "decreased" : "increased";
+  return {dir, pp:Math.abs(d)};
+}
+
+/* -------------------- pause / reroute control -------------------- */
 function odMatch(ids,o,d){ const a=ids[0], b=ids[ids.length-1]; return (a===o&&b===d)||(a===d&&b===o); }
 function setTruckPath(T,latlon,toMid=false){ if(!latlon||latlon.length<2) return; T.latlon=latlon; T.seg=0; T.dir=1; T.t=toMid?0.5:0.0; }
 function pauseAllOnRoute(step){
   const ids=step.route; const latlon=expandIDsToLatLon(ids);
-  let paused=0;
   for(const T of trucks){
     const baseIDs=defaultPathIDs(T.origin,T.dest);
     if(odMatch(baseIDs, ids[0], ids[1])){
       if(!T.savedPath) T.savedPath={ latlon:[...T.latlon], seg:T.seg, t:T.t, dir:T.dir };
       setTruckPath(T, latlon, true);
-      T.paused=true; paused++;
+      T.paused=true;
     }
   }
-  return paused;
 }
 function unpauseAll(resetToSaved){
   for(const T of trucks){
@@ -564,16 +596,17 @@ function clearAlert(){ setSourceFeatures("alert",[]); }
 function setFix(pairs){ setSourceFeatures("fix",(pairs||[]).map(pair=>featureForRoute(pair))); }
 function clearFix(){ setSourceFeatures("fix",[]); }
 
-/* -------------------- scenario activation helpers -------------------- */
 function activateTrucksFromScenario(scn){
   trucks.length=0; truckNumberById.clear();
   (scn.trucks||[]).forEach((t,i)=>spawnTruck(t,i));
 }
+
 function startDisrupt(){
   if(mode==="disrupt"){
     Narrator.sayLinesTwice(["A disruption is already active. Please click the Correct button to proceed."],900,0.92);
     return;
   }
+  SHOW_HUB=false; refreshRoadNetwork(); // hide hub spokes
   currentStepIdx = (currentStepIdx + 1) % STEPS.length;
   const step=STEPS[currentStepIdx];
   clearFix(); setAlert(step.route);
@@ -593,6 +626,7 @@ function applyCorrect(){
     Narrator.sayLinesTwice(["No active disruption. Click Disrupt first."],800,0.95);
     return;
   }
+  SHOW_HUB=false; refreshRoadNetwork(); // hide hub spokes
   const step=STEPS[currentStepIdx];
   clearAlert(); setFix(step.reroute);
   reroutePaused(step);
@@ -601,6 +635,7 @@ function applyCorrect(){
   mode="fixed";
 }
 function backToNormal(){
+  SHOW_HUB=false; refreshRoadNetwork(); // hide hub spokes
   Narrator.clear();
   clearAlert(); clearFix();
   activateTrucksFromScenario(SCN_BEFORE);
@@ -621,34 +656,46 @@ function applyDeltaToStats(base, deltaCounts, invShiftPerTruck=10){
   return out;
 }
 
-/* -------------------- Hub Addition flow -------------------- */
+/* -------------------- Hub Addition flow (with human narration) -------------------- */
 function hubAddition(){
   if(!SCN_HUB){
     Narrator.sayLinesTwice(["Hub scenario not found in scenario_after.json (key 'hub')."], 800, 0.95);
     return;
   }
   Narrator.clear(); clearAlert(); clearFix();
-  // swap trucks to hub scenario
+
+  // show hub spokes & marker
+  SHOW_HUB=true; refreshRoadNetwork();
+
+  // swap trucks to hub scenario and update dashboard
   activateTrucksFromScenario(SCN_HUB);
   renderStatsTable(hubStats||beforeStats);
 
-  // compute and narrate deltas
+  // compute deltas
   const baseS = summarizeScenario(SCN_BEFORE);
   const hubS  = summarizeScenario(SCN_HUB);
-  const movDelta = pctDelta(baseS.movements, hubS.movements);
-  const kmDelta  = pctDelta(baseS.truckKm, hubS.truckKm);
-  const etaDelta = hubS.meanEta - baseS.meanEta;
-  const p90Delta = hubS.p90Eta  - baseS.p90Eta;
-  const utilDelta= hubS.utilization - baseS.utilization;
 
-  const dwell = SCN_HUB?.policies?.hub_dwell_min ?? 0;
-  const batch = SCN_HUB?.policies?.consolidation_window_min ?? 0;
+  const mov = pctDeltaHuman(baseS.movements, hubS.movements);
+  const km  = pctDeltaHuman(baseS.truckKm, hubS.truckKm);
+  const util= ppDeltaHuman(baseS.utilization, hubS.utilization);
+
+  const meanHrBase = toHours1(baseS.meanEta);
+  const meanHrHub  = toHours1(hubS.meanEta);
+  const meanDir = (meanHrHub<meanHrBase) ? "decreased" : "increased";
+  const meanDelta = Math.abs(Math.round((meanHrHub-meanHrBase)*10)/10);
+
+  const p90HrBase = toHours1(baseS.p90Eta);
+  const p90HrHub  = toHours1(hubS.p90Eta);
+  const p90Dir = (p90HrHub<p90HrBase) ? "decreased" : "increased";
+  const p90Delta = Math.abs(Math.round((p90HrHub-p90HrBase)*10)/10);
 
   const lines=[
     "Hub Addition engaged — evaluating Nagpur as a consolidation hub.",
-    `Movements ${movDelta<0?"↓":"↑"}${Math.abs(movDelta)}% (${baseS.movements} → ${hubS.movements}); Truck-km ${kmDelta<0?"↓":"↑"}${Math.abs(kmDelta)}%.`,
-    `Mean O→D ETA ${etaDelta>=0?"+":""}${etaDelta} min; p90 ${p90Delta>=0?"+":""}${p90Delta} min (includes hub dwell ${dwell}m${batch?` + consolidation ${batch}m`:""}).`,
-    `Average utilization ${hubS.utilization}% (${utilDelta>=0?"+":""}${utilDelta} pp vs baseline).`
+    `Truck movements ${mov.dir} by ${mov.pct} percent, from ${fmtInt(baseS.movements)} to ${fmtInt(hubS.movements)}.`,
+    `Distance traveled ${km.dir} by ${km.pct} percent, from ${fmtKm(baseS.truckKm)} to ${fmtKm(hubS.truckKm)}.`,
+    `Average O→D time ${meanDir} by ${meanDelta} hours, from ${meanHrBase} to ${meanHrHub} hours.`,
+    `90th percentile time ${p90Dir} by ${p90Delta} hours, from ${p90HrBase} to ${p90HrHub} hours.`,
+    `Average utilization ${util.dir} by ${util.pp} percentage points, from ${baseS.utilization} percent to ${hubS.utilization} percent.`
   ];
   Narrator.sayLinesTwice(lines, 850, 0.92);
   mode="hub";
@@ -707,7 +754,6 @@ const mapReady=new Promise(res=>map.on("load",res));
   // load scenarios
   SCN_BEFORE = await fetchOrDefault("scenario_before.json", DEFAULT_BEFORE);
   const afterRaw = await fetchOrDefault("scenario_after.json", DEFAULT_BEFORE);
-  // keep your corrected scenario as SCN_AFTER; pull hub demo (if present)
   SCN_AFTER = { warehouses: afterRaw.warehouses, trucks: afterRaw.trucks, policies: afterRaw.policies||{} };
   SCN_HUB   = afterRaw.hub ? { warehouses: afterRaw.hub.warehouses, trucks: afterRaw.hub.trucks, policies: afterRaw.hub.policies } : null;
 
