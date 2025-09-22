@@ -1,7 +1,11 @@
 /* =========================================================================
-   Agentic Twin — Disrupt → Correct → Normal + Hub Addition (v5.3)
-   - Fix: remove duplicate helper declarations that broke parsing
-   - Replay waits for first pass to finish (onend-based), with fallback timer
+   Agentic Twin — Disrupt → Correct → Normal + Hub Addition (v5.1)
+   Enhancements:
+   - Hub node drawn at Nagpur only in Hub mode
+   - Hub spokes appear only in Hub mode (baseline network unchanged)
+   - Human-sounding narration (percent, from→to, hours)
+   - Times reported in hours (1 decimal)
+   - No camera auto-centering (same as your v4.1)
    ======================================================================= */
 
 /* -------------------- tiny debug pill -------------------- */
@@ -61,6 +65,7 @@ function getRoadLatLon(a,b){
   const k1=keyFor(a,b), k2=keyFor(b,a);
   if(RP[k1]) return RP[k1];
   if(RP[k2]) return [...RP[k2]].reverse();
+  // fallback coords if unseen ID is the hub
   const ca=(CITY[a]||HUB[a])||{lat:21.1458,lon:79.0882};
   const cb=(CITY[b]||HUB[b])||{lat:21.1458,lon:79.0882};
   return [[ca.lat,ca.lon],[cb.lat,cb.lon]];
@@ -97,7 +102,7 @@ const DEFAULT_BEFORE={
   policies:{ capacity_units:10, default_speed_kmph:55, use_hub:false }
 };
 
-/* -------------------- Disruption steps -------------------- */
+/* -------------------- Disruption steps (as in your build) -------------------- */
 const STEPS=[
   {id:"D1",route:["WH1","WH2"],reroute:[["WH1","WH4"],["WH4","WH2"]],
    cause:["Disruption one.","Delhi to Mumbai corridor is closed near Rajasthan.","All trucks on this corridor are safely paused.","Please click the Correct button to apply the AI fix."],
@@ -327,7 +332,7 @@ function drawFrame(){
   drawWarehouses();
 }
 
-/* -------------------- Narration + Chat (with onend-based replay) ----------- */
+/* -------------------- Narration + Chat ------------------------------------ */
 const synth=window.speechSynthesis; let VOICE=null;
 function pickVoice(){
   const vs=synth?.getVoices?.()||[];
@@ -404,11 +409,9 @@ const ChatUI = (() => {
 const Narrator = (() => {
   let muted = false;
   let ttsTimers = [];
-  let replayTimer = null;
 
   function clearTTS(){
     ttsTimers.forEach(clearTimeout); ttsTimers=[];
-    if(replayTimer){ clearTimeout(replayTimer); replayTimer=null; }
     try{ synth?.cancel?.(); }catch(e){}
   }
   function speakOnce(text, rate=0.95){
@@ -421,48 +424,21 @@ const Narrator = (() => {
   function measure(lines, rate=0.95, gap=950){
     let t=0; lines.forEach(line=>{ const d=Math.max(1700,48*line.length); t+=d+gap; }); return t;
   }
-
-  // Queue a set of lines; invoke onDone AFTER the last spoken line actually finishes.
-  function queue(lines, gap=950, rate=0.95, onDone){
+  function queue(lines, gap=950, rate=0.95){
     clearTTS();
     let t=0;
-    let totalDuration=0;
-    lines.forEach((line, idx)=>{
+    lines.forEach(line=>{
       const d=Math.max(1700,48*line.length);
       ChatUI.appendSystem(line);
-      const isLast = (idx === lines.length - 1);
-      ttsTimers.push(setTimeout(()=>{
-        if(!muted && synth){
-          const u = new SpeechSynthesisUtterance(String(line));
-          if(VOICE) u.voice = VOICE;
-          u.rate = rate; u.pitch = 1.0; u.volume = 1.0;
-          if(isLast && typeof onDone === 'function'){
-            u.onend = ()=>{ onDone(); };
-          }
-          synth.speak(u);
-        }
-      }, t));
+      ttsTimers.push(setTimeout(()=>speakOnce(line, rate), t));
       t += d + gap;
-      totalDuration = t;
     });
-    return totalDuration;
   }
-
   function queueTwice(lines, gap=950, rate=0.95){
     clearTTS();
-    let doneFired = false;
-
-    const dur = queue(lines, gap, rate, ()=>{
-      doneFired = true;
-      replayTimer = setTimeout(()=>{ queue(lines, gap, rate); }, 350);
-    });
-
-    // Fallback if muted or no onend fired (e.g., TTS engine issue)
-    replayTimer = setTimeout(()=>{
-      if(!doneFired){
-        queue(lines, gap, rate);
-      }
-    }, dur + 1000);
+    const dur = measure(lines, rate, gap);
+    queue(lines, gap, rate);
+    ttsTimers.push(setTimeout(()=>queue(lines, gap, rate), dur+600));
   }
 
   return {
@@ -494,7 +470,7 @@ function renderStatsTable(pred){
   }
 }
 
-/* -------------------- metrics & formatters for Hub demo -------------------- */
+/* -------------------- metrics for Hub demo -------------------- */
 function haversineKm(a,b){
   const toRad=v=>v*Math.PI/180, R=6371;
   const dLat=toRad(b[0]-a[0]), dLon=toRad(b[1]-a[1]);
@@ -507,7 +483,9 @@ function pathDistanceKm(ids){
   let d=0; for(let i=0;i<pts.length-1;i++) d+=haversineKm([pts[i][0],pts[i][1]],[pts[i+1][0],pts[i+1][1]]);
   return d;
 }
-function truckDistanceKm(tr){ return pathDistanceKm([tr.origin, tr.destination]); }
+function truckDistanceKm(tr){
+  return pathDistanceKm([tr.origin, tr.destination]);
+}
 function truckDriveMin(tr, scn){
   const speed = tr.speed_kmph || scn?.policies?.default_speed_kmph || DEFAULT_SPEED_KMPH;
   const km = truckDistanceKm(tr);
@@ -558,10 +536,24 @@ function summarizeScenario(scn){
   return { movements, truckKm, meanEta:minRound(mean), p90Eta:minRound(p90), utilization:Math.round(util*100), totalUnits:totalW };
 }
 function minRound(x){ return Math.round(x); }
+
+/* ----- human-friendly formatters for narration ----- */
 const fmtInt = (n)=>Math.round(n).toLocaleString("en-US");
 const roundKm = (km)=>Math.round(km/10)*10;
 const fmtKm = (km)=>`${fmtInt(roundKm(km))} kilometers`;
-const toHours1 = (min)=> (Math.round((min/60)*10)/10);
+const toHours1 = (min)=> (Math.round((min/60)*10)/10); // 1 decimal
+const fmtHours = (min)=>`${toHours1(min)} hours`;
+function pctDeltaHuman(base, now){
+  if(base===0) return {dir:"changed", pct:0};
+  const d = Math.round(Math.abs((now-base)/base*100));
+  const dir = (now<base) ? "decreased" : "increased";
+  return {dir, pct:d};
+}
+function ppDeltaHuman(basePct, nowPct){
+  const d = Math.round(nowPct - basePct);
+  const dir = (d<0) ? "decreased" : "increased";
+  return {dir, pp:Math.abs(d)};
+}
 
 /* -------------------- pause / reroute control -------------------- */
 function odMatch(ids,o,d){ const a=ids[0], b=ids[ids.length-1]; return (a===o&&b===d)||(a===d&&b===o); }
@@ -614,7 +606,7 @@ function startDisrupt(){
     Narrator.sayLinesTwice(["A disruption is already active. Please click the Correct button to proceed."],900,0.92);
     return;
   }
-  SHOW_HUB=false; refreshRoadNetwork();
+  SHOW_HUB=false; refreshRoadNetwork(); // hide hub spokes
   currentStepIdx = (currentStepIdx + 1) % STEPS.length;
   const step=STEPS[currentStepIdx];
   clearFix(); setAlert(step.route);
@@ -634,7 +626,7 @@ function applyCorrect(){
     Narrator.sayLinesTwice(["No active disruption. Click Disrupt first."],800,0.95);
     return;
   }
-  SHOW_HUB=false; refreshRoadNetwork();
+  SHOW_HUB=false; refreshRoadNetwork(); // hide hub spokes
   const step=STEPS[currentStepIdx];
   clearAlert(); setFix(step.reroute);
   reroutePaused(step);
@@ -643,7 +635,7 @@ function applyCorrect(){
   mode="fixed";
 }
 function backToNormal(){
-  SHOW_HUB=false; refreshRoadNetwork();
+  SHOW_HUB=false; refreshRoadNetwork(); // hide hub spokes
   Narrator.clear();
   clearAlert(); clearFix();
   activateTrucksFromScenario(SCN_BEFORE);
@@ -664,19 +656,7 @@ function applyDeltaToStats(base, deltaCounts, invShiftPerTruck=10){
   return out;
 }
 
-/* -------------------- Hub Addition flow (human narration) ------------------- */
-function pctDeltaHuman(base, now){
-  if(base===0) return {dir:"changed", pct:0};
-  const d = Math.round(Math.abs((now-base)/base*100));
-  const dir = (now<base) ? "decreased" : "increased";
-  return {dir, pct:d};
-}
-function ppDeltaHuman(basePct, nowPct){
-  const d = Math.round(nowPct - basePct);
-  const dir = (d<0) ? "decreased" : "increased";
-  return {dir, pp:Math.abs(d)};
-}
-
+/* -------------------- Hub Addition flow (with human narration) -------------------- */
 function hubAddition(){
   if(!SCN_HUB){
     Narrator.sayLinesTwice(["Hub scenario not found in scenario_after.json (key 'hub')."], 800, 0.95);
@@ -684,11 +664,14 @@ function hubAddition(){
   }
   Narrator.clear(); clearAlert(); clearFix();
 
+  // show hub spokes & marker
   SHOW_HUB=true; refreshRoadNetwork();
 
+  // swap trucks to hub scenario and update dashboard
   activateTrucksFromScenario(SCN_HUB);
   renderStatsTable(hubStats||beforeStats);
 
+  // compute deltas
   const baseS = summarizeScenario(SCN_BEFORE);
   const hubS  = summarizeScenario(SCN_HUB);
 
@@ -783,7 +766,7 @@ const mapReady=new Promise(res=>map.on("load",res));
   // spawn trucks from BEFORE scenario
   activateTrucksFromScenario(SCN_BEFORE);
 
-  // initial camera — symmetric padding
+  // initial camera — symmetric padding (no chat-dependent offset)
   const b=new maplibregl.LngLatBounds(); Object.values(CITY).forEach(c=>b.extend([c.lon,c.lat]));
   map.fitBounds(b,{padding:{top:60,left:60,right:320,bottom:60},duration:800,maxZoom:6.8});
 
